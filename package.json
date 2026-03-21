@@ -1,0 +1,11 @@
+{
+  "name": "project-visulizar",
+  "private": true,
+  "description": "Convenience scripts to start API and client in separate terminals",
+  "scripts": {
+    "start": "bash scripts/start-all.sh",
+    "dev": "bash scripts/start-all.sh",
+    "server": "bash scripts/start-server.sh",
+    "client": "bash scripts/start-client.sh"
+  }
+}
