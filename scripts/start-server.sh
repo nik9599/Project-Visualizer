@@ -5,8 +5,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT/SERVER"
 
-if [[ -f venv/bin/activate ]]; then
-  # shellcheck source=/dev/null
+# Activate virtual environment if it exists (Windows or Unix style)
+if [[ -f .venv/Scripts/activate ]]; then
+  source .venv/Scripts/activate
+elif [[ -f .venv/bin/activate ]]; then
+  source .venv/bin/activate
+elif [[ -f venv/Scripts/activate ]]; then
+  source venv/Scripts/activate
+elif [[ -f venv/bin/activate ]]; then
   source venv/bin/activate
 fi
 

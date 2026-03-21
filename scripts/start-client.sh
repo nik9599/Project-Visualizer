@@ -10,7 +10,7 @@ export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 if [[ -s "$NVM_DIR/nvm.sh" ]]; then
   # shellcheck source=/dev/null
   source "$NVM_DIR/nvm.sh"
-  if nvm use 22; then
+  if nvm use 22 2>/dev/null; then
     echo "Using Node $(node -v) (nvm 22)"
   else
     echo "Warning: nvm could not switch to Node 22; continuing with current node: $(command -v node 2>/dev/null || echo none)" >&2

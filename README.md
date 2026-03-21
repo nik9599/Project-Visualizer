@@ -56,7 +56,125 @@ Understanding large React codebases can be difficult — especially when trying 
 
 ### One command (recommended)
 
-From the repo root:
+**Windows:**
+```bash
+.\scripts\start-all.bat
+```
 
+**macOS/Linux:**
 ```bash
 ./scripts/start-all.sh
+```
+
+This will open **two terminals** automatically:
+- **Server**: Flask API at http://localhost:8000
+- **Client**: React Dev Server at http://localhost:5173
+
+> **📖 Need more help?**
+> - **Windows Users**: See [WINDOWS_SETUP.md](WINDOWS_SETUP.md) for detailed setup
+> - **All Users**: See [COMMANDS.md](COMMANDS.md) for quick command reference
+
+### Manual setup
+
+#### Prerequisites
+- **Node.js** 18+ (for client)
+- **Python** 3.8+ (for server)
+
+#### 1. Setup Server (Python)
+
+```bash
+# Windows
+cd SERVER
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install flask flasgger flask-cors
+npm install
+
+# macOS/Linux
+cd SERVER
+python3 -m venv venv
+source venv/bin/activate
+pip install flask flasgger flask-cors
+npm install
+```
+
+#### 2. Setup Client (React)
+
+```bash
+cd client
+npm install
+npm run dev
+```
+
+#### 3. Run Server
+
+**Windows:**
+```bash
+.\scripts\start-server.bat
+```
+
+**macOS/Linux:**
+```bash
+./scripts/start-server.sh
+```
+
+Server runs at: http://localhost:8000
+
+---
+
+## 📁 Project Structure
+
+```
+Project-Visualizer/
+├── client/              # React + Vite frontend
+│   ├── src/
+│   │   ├── App.tsx
+│   │   └── main.tsx
+│   └── package.json
+├── SERVER/              # Flask backend
+│   ├── main.py
+│   ├── Router/          # API routes
+│   ├── Services/        # File parsing & analysis
+│   └── package.json
+├── scripts/             # Startup scripts
+│   ├── start-all.bat    # Windows - start both
+│   ├── start-all.sh     # Unix - start both
+│   ├── start-server.bat # Windows - server only
+│   ├── start-server.sh  # Unix - server only
+│   ├── start-client.bat # Windows - client only
+│   └── start-client.sh  # Unix - client only
+└── README.md
+```
+
+---
+
+## 🌐 API Endpoints
+
+- **POST** `/upload` - Upload a file and generate call graph
+- **GET** `/docs` - Swagger API documentation
+
+---
+
+## 🎯 Usage
+
+1. Visit http://localhost:5173
+2. Click "Upload" and select a React JS/TS file
+3. View the interactive call graph
+4. Click nodes to view source code
+
+---
+
+## 🐛 Troubleshooting
+
+**Server won't start?**
+- Ensure Python virtual environment is activated
+- Check: `python --version` (should be 3.8+)
+- Reinstall deps: `pip install flask flasgger flask-cors`
+
+**Client won't start?**
+- Ensure Node.js is installed: `node --version`
+- Delete `node_modules` and `package-lock.json`, then `npm install`
+
+**Port already in use?**
+- Change port in `SERVER/main.py` (currently 8000)
+- Change port in `client/vite.config.ts` (currently 5173)
