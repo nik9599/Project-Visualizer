@@ -5,7 +5,7 @@ const path = require("path");
 const fs = require("fs");
 const parser = require("@babel/parser");
 const traverse = require("@babel/traverse").default;
-const { getParserPlugins } = require("./parserCore");
+const { getParserPlugins } = require("../Parser/parserCore");
 
 const TRY_EXTS = ["", ".tsx", ".ts", ".jsx", ".js"];
 

@@ -7,7 +7,7 @@
 const fs = require("fs");
 const path = require("path");
 const { parseSourceToFunctions } = require("./parserCore");
-const { wireRoutesIntoMerged } = require("./routeExtractor");
+const { wireRoutesIntoMerged } = require("../Services/routeExtractor");
 
 const rootDir = process.argv[2];
 const mode = (process.argv[3] || "react").toLowerCase();
