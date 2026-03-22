@@ -143,10 +143,39 @@ def _safe_extract_zip(zip_path: str, dest_dir: str) -> None:
 
 def format_for_graph(raw: dict) -> dict:
     """
-    Parser output (new): { fnName: { "callees": [...], "code": "function fnName..." } }
-    Legacy:          { fnName: [callee, ...] }
-    D3-ready:        { nodes: [{id, label, external, code?}], edges: [...] }
+    Handle both old parser format and new D3.js format.
+    Old format: { fnName: { "callees": [...], "code": "function fnName..." } } or { fnName: [callee, ...] }
+    New D3.js format: { nodes: [...], links: [...], ... }
+    Output: { nodes: [{id, label, external, code?, kind?}], edges: [{source, target}] }
     """
+    # Check if this is the new D3.js format
+    if "nodes" in raw and "links" in raw:
+        # Transform D3.js format to expected format
+        nodes = []
+        for node in raw["nodes"]:
+            formatted_node = {
+                "id": node["id"],
+                "label": node.get("label", node["id"]),
+                "external": False,  # Assume internal unless we can determine otherwise
+            }
+            if "type" in node:
+                formatted_node["kind"] = node["type"]
+            if "code" in node and node["code"]:
+                formatted_node["code"] = node["code"]
+            elif "exports" in node and node["exports"]:
+                formatted_node["code"] = f"exports: {', '.join(node['exports'])}"
+            nodes.append(formatted_node)
+
+        edges = []
+        for link in raw["links"]:
+            edges.append({
+                "source": link["source"],
+                "target": link["target"]
+            })
+
+        return {"nodes": nodes, "edges": edges}
+
+    # Handle old format
     callee_map: dict[str, list] = {}
     sources: dict[str, str | None] = {}
     kinds: dict[str, str] = {}
@@ -170,7 +199,8 @@ def format_for_graph(raw: dict) -> dict:
 
     for callees in callee_map.values():
         for callee in callees:
-            all_ids.add(callee)
+            if isinstance(callee, str):
+                all_ids.add(callee)
 
     nodes: list[dict] = []
     for fn_id in sorted(all_ids):
@@ -194,10 +224,11 @@ def format_for_graph(raw: dict) -> dict:
     edges: list[dict] = []
     for caller, callees in callee_map.items():
         for callee in callees:
-            key = (caller, callee)
-            if key not in seen_edges and caller != callee:
-                seen_edges.add(key)
-                edges.append({"source": caller, "target": callee})
+            if isinstance(callee, str):
+                key = (caller, callee)
+                if key not in seen_edges and caller != callee:
+                    seen_edges.add(key)
+                    edges.append({"source": caller, "target": callee})
 
     return {"nodes": nodes, "edges": edges}
 

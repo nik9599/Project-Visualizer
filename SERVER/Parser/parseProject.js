@@ -2,7 +2,8 @@
  * CLI: node parseProject.js <absoluteRootDir> <mode>
  * mode: "react" | "vanilla"
  *
- * Emits one JSON object: { "relative/path.js::fnName": { callees, code }, ... }
+ * Generates D3.js compatible dependency graph for React projects
+ * Supports: Create React App, Vite + React, Next.js
  */
 const fs = require("fs");
 const path = require("path");
@@ -11,6 +12,414 @@ const { wireRoutesIntoMerged, resolveModuleToRelPath } = require("./routeExtract
 const parser = require("@babel/parser");
 const traverse = require("@babel/traverse").default;
 const { getParserPlugins } = require("./parserCore");
+
+// Project type detection
+function detectProjectType(rootDir) {
+  // Check client/package.json first (for monorepo setups)
+  const clientPackageJson = path.join(rootDir, "client", "package.json");
+  if (fs.existsSync(clientPackageJson)) {
+    try {
+      const packageJson = JSON.parse(fs.readFileSync(clientPackageJson, "utf-8"));
+      const deps = { ...packageJson.dependencies, ...packageJson.devDependencies };
+
+      if (deps["next"]) return "next";
+      if (deps["vite"]) return "vite";
+      if (deps["react-scripts"]) return "cra";
+      return "unknown";
+    } catch {
+      // Fall through to root package.json
+    }
+  }
+
+  // Check root package.json
+  const rootPackageJson = path.join(rootDir, "package.json");
+  try {
+    const packageJson = JSON.parse(fs.readFileSync(rootPackageJson, "utf-8"));
+    const deps = { ...packageJson.dependencies, ...packageJson.devDependencies };
+
+    if (deps["next"]) return "next";
+    if (deps["vite"]) return "vite";
+    if (deps["react-scripts"]) return "cra";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+// Find entry point based on project type
+function findEntryPoint(rootDir, projectType) {
+  // Check if there's a client directory (monorepo setup)
+  const clientSrcDir = path.join(rootDir, "client", "src");
+  const hasClientDir = fs.existsSync(clientSrcDir);
+  const srcDir = hasClientDir ? clientSrcDir : path.join(rootDir, "src");
+
+  switch (projectType) {
+    case "vite":
+      // Vite: src/main.jsx or src/main.tsx
+      const viteMainTsx = path.join(srcDir, "main.tsx");
+      const viteMainJsx = path.join(srcDir, "main.jsx");
+      if (fs.existsSync(viteMainTsx)) return path.relative(rootDir, viteMainTsx).replace(/\\/g, "/");
+      if (fs.existsSync(viteMainJsx)) return path.relative(rootDir, viteMainJsx).replace(/\\/g, "/");
+      break;
+
+    case "cra":
+      // CRA: src/index.js or src/index.tsx
+      const craIndexTsx = path.join(srcDir, "index.tsx");
+      const craIndexJs = path.join(srcDir, "index.js");
+      if (fs.existsSync(craIndexTsx)) return path.relative(rootDir, craIndexTsx).replace(/\\/g, "/");
+      if (fs.existsSync(craIndexJs)) return path.relative(rootDir, craIndexJs).replace(/\\/g, "/");
+      break;
+
+    case "next":
+      // Next.js: pages/_app.js or app/layout.tsx
+      const nextAppRouter = path.join(rootDir, "app", "layout.tsx");
+      const nextPagesRouter = path.join(rootDir, "pages", "_app.js");
+      if (fs.existsSync(nextAppRouter)) return path.relative(rootDir, nextAppRouter).replace(/\\/g, "/");
+      if (fs.existsSync(nextPagesRouter)) return path.relative(rootDir, nextPagesRouter).replace(/\\/g, "/");
+      break;
+  }
+
+  // Fallback: try common entry points
+  const commonEntries = hasClientDir
+    ? ["client/src/main.tsx", "client/src/main.jsx", "client/src/index.tsx", "client/src/index.js"]
+    : ["src/main.tsx", "src/main.jsx", "src/index.tsx", "src/index.js"];
+
+  for (const entry of commonEntries) {
+    const fullPath = path.join(rootDir, entry);
+    if (fs.existsSync(fullPath)) return entry;
+  }
+
+  return null;
+}
+
+// Resolve path aliases from config files
+function resolvePathAliases(rootDir, projectType) {
+  const aliases = {};
+
+  // Check for client directory
+  const clientDir = path.join(rootDir, "client");
+  const configDirs = [rootDir];
+  if (fs.existsSync(clientDir)) {
+    configDirs.push(clientDir);
+  }
+
+  for (const configDir of configDirs) {
+    // Check tsconfig.json/jsconfig.json
+    const configFiles = ["tsconfig.json", "jsconfig.json"];
+    for (const configFile of configFiles) {
+      try {
+        const configPath = path.join(configDir, configFile);
+        if (fs.existsSync(configPath)) {
+          const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+          const paths = config.compilerOptions?.paths;
+          if (paths) {
+            for (const [alias, targets] of Object.entries(paths)) {
+              if (Array.isArray(targets) && targets.length > 0) {
+                const cleanAlias = alias.replace("/*", "");
+                const cleanTarget = targets[0].replace("/*", "").replace("./", "");
+                aliases[cleanAlias] = cleanTarget;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[DEBUG] Failed to parse ${configFile}:`, e.message);
+      }
+    }
+
+    // Check vite.config.js/ts
+    if (projectType === "vite") {
+      const viteConfigs = ["vite.config.js", "vite.config.ts"];
+      for (const configFile of viteConfigs) {
+        try {
+          const configPath = path.join(configDir, configFile);
+          if (fs.existsSync(configPath)) {
+            const content = fs.readFileSync(configPath, "utf-8");
+            // Simple regex to find alias definitions
+            const aliasMatches = content.match(/alias:\s*{([^}]+)}/);
+            if (aliasMatches) {
+              const aliasBlock = aliasMatches[1];
+              const aliasPairs = aliasBlock.match(/['"]([^'"]+)['"]\s*:\s*['"]([^'"]+)['"]/g);
+              if (aliasPairs) {
+                for (const pair of aliasPairs) {
+                  const [, alias, target] = pair.match(/['"]([^'"]+)['"]\s*:\s*['"]([^'"]+)['"]/);
+                  aliases[alias] = target.replace("./", "");
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error(`[DEBUG] Failed to parse ${configFile}:`, e.message);
+        }
+      }
+    }
+  }
+
+  console.error(`[DEBUG] Resolved path aliases:`, aliases);
+  return aliases;
+}
+
+// Resolve import path with aliases
+function resolveImportPath(importPath, fromFile, rootDir, aliases) {
+  // Handle relative imports
+  if (importPath.startsWith(".")) {
+    const fromDir = path.dirname(fromFile);
+    return path.resolve(rootDir, fromDir, importPath);
+  }
+
+  // Handle absolute imports with aliases
+  for (const [alias, target] of Object.entries(aliases)) {
+    if (importPath.startsWith(alias)) {
+      const relativePath = importPath.slice(alias.length);
+      const resolved = path.join(rootDir, target, relativePath);
+      if (fs.existsSync(resolved) || fs.existsSync(resolved + ".js") || fs.existsSync(resolved + ".jsx") || fs.existsSync(resolved + ".ts") || fs.existsSync(resolved + ".tsx")) {
+        return resolved;
+      }
+    }
+  }
+
+  // Handle node_modules (skip)
+  if (!importPath.startsWith(".") && !importPath.startsWith("/")) {
+    return null; // Skip external dependencies
+  }
+
+  return path.resolve(rootDir, importPath);
+}
+
+// Calculate D3 group number based on file path
+function getGroupNumber(filePath) {
+  const lowerPath = filePath.toLowerCase();
+
+  if (lowerPath.includes("page") || lowerPath.includes("view") || lowerPath.includes("screen")) return 2;
+  if (lowerPath.includes("component")) return 3;
+  if (lowerPath.includes("hook") || lowerPath.includes("use")) return 4;
+  if (lowerPath.includes("context") || lowerPath.includes("provider")) return 5;
+  if (lowerPath.includes("util") || lowerPath.includes("helper") || lowerPath.includes("service")) return 6;
+  if (lowerPath.includes("layout")) return 7;
+
+  return 1; // Default to entry/root
+}
+
+// Check if file should be skipped
+function shouldSkipFile(filePath) {
+  const lowerPath = filePath.toLowerCase();
+  const fileName = path.basename(filePath);
+
+  // Skip test files
+  if (fileName.includes(".test.") || fileName.includes(".spec.") || lowerPath.includes("__tests__")) return true;
+
+  // Skip config files
+  if (fileName.includes("config.") || fileName.includes(".config.")) return true;
+
+  // Skip CSS and assets
+  if (fileName.endsWith(".css") || fileName.endsWith(".scss") || fileName.endsWith(".png") ||
+      fileName.endsWith(".jpg") || fileName.endsWith(".svg") || fileName.endsWith(".woff")) return true;
+
+  return false;
+}
+
+// Comprehensive file analysis
+function analyzeFile(filePath, rootDir, aliases) {
+  const relPath = path.relative(rootDir, filePath).replace(/\\/g, "/");
+  const ext = path.extname(filePath).toLowerCase();
+
+  console.error(`[DEBUG] Analyzing file: ${relPath}`);
+
+  let code;
+  try {
+    code = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+
+  // Count lines of code
+  const loc = code.split("\n").length;
+
+  let ast;
+  try {
+    ast = parser.parse(code, {
+      sourceType: "module",
+      allowImportExportEverywhere: true,
+      plugins: getParserPlugins(ext),
+    });
+  } catch (e) {
+    console.error(`[DEBUG] Failed to parse ${relPath}:`, e.message);
+    return null;
+  }
+
+  const analysis = {
+    filePath: relPath,
+    exports: [],
+    imports: [],
+    components: [],
+    hooks: [],
+    contexts: [],
+    renders: [],
+    calls: [],
+    provides: [],
+    consumes: []
+  };
+
+  // Collect exports
+  traverse(ast, {
+    ExportNamedDeclaration(p) {
+      if (p.declaration) {
+        if (p.declaration.type === "FunctionDeclaration" && p.declaration.id) {
+          analysis.exports.push(p.declaration.id.name);
+        } else if (p.declaration.type === "VariableDeclaration") {
+          for (const decl of p.declaration.declarations) {
+            if (decl.id.type === "Identifier") {
+              analysis.exports.push(decl.id.name);
+            }
+          }
+        }
+      }
+    },
+    ExportDefaultDeclaration(p) {
+      if (p.declaration) {
+        if (p.declaration.type === "FunctionDeclaration" && p.declaration.id) {
+          analysis.exports.push(p.declaration.id.name);
+        } else if (p.declaration.id && p.declaration.id.type === "Identifier") {
+          analysis.exports.push(p.declaration.id.name);
+        }
+      }
+    }
+  });
+
+  // Collect imports and their resolved paths
+  traverse(ast, {
+    ImportDeclaration(p) {
+      const importPath = p.node.source.value;
+      const resolvedPath = resolveImportPath(importPath, relPath, rootDir, aliases);
+
+      for (const spec of p.node.specifiers) {
+        if (spec.type === "ImportSpecifier") {
+          analysis.imports.push({
+            name: spec.imported.name,
+            local: spec.local.name,
+            from: resolvedPath ? path.relative(rootDir, resolvedPath).replace(/\\/g, "/") : importPath,
+            type: "named"
+          });
+        } else if (spec.type === "ImportDefaultSpecifier") {
+          analysis.imports.push({
+            name: spec.local.name,
+            local: spec.local.name,
+            from: resolvedPath ? path.relative(rootDir, resolvedPath).replace(/\\/g, "/") : importPath,
+            type: "default"
+          });
+        }
+      }
+    }
+  });
+
+  // Find component definitions
+  traverse(ast, {
+    FunctionDeclaration(p) {
+      if (p.node.id && /^[A-Z]/.test(p.node.id.name)) {
+        // Check if it returns JSX
+        let hasJSX = false;
+        traverse(p.node, {
+          JSXElement() { hasJSX = true; },
+          JSXFragment() { hasJSX = true; }
+        }, p.scope);
+
+        if (hasJSX) {
+          analysis.components.push({
+            name: p.node.id.name,
+            type: "function",
+            loc: p.node.loc.end.line - p.node.loc.start.line
+          });
+        }
+      }
+    },
+    VariableDeclarator(p) {
+      if (p.node.id.type === "Identifier" && /^[A-Z]/.test(p.node.id.name)) {
+        if (p.node.init && (p.node.init.type === "ArrowFunctionExpression" || p.node.init.type === "FunctionExpression")) {
+          let hasJSX = false;
+          traverse(p.node.init, {
+            JSXElement() { hasJSX = true; },
+            JSXFragment() { hasJSX = true; }
+          }, p.scope);
+
+          if (hasJSX) {
+            analysis.components.push({
+              name: p.node.id.name,
+              type: "arrow",
+              loc: p.node.loc.end.line - p.node.loc.start.line
+            });
+          }
+        }
+      }
+    },
+    ClassDeclaration(p) {
+      if (p.node.id && /^[A-Z]/.test(p.node.id.name) && p.node.superClass) {
+        // Check if it extends React.Component or Component
+        const superClass = p.node.superClass;
+        if (superClass.type === "MemberExpression" &&
+            superClass.object.name === "React" &&
+            superClass.property.name === "Component") {
+          analysis.components.push({
+            name: p.node.id.name,
+            type: "class",
+            loc: p.node.loc.end.line - p.node.loc.start.line
+          });
+        } else if (superClass.type === "Identifier" && superClass.name === "Component") {
+          analysis.components.push({
+            name: p.node.id.name,
+            type: "class",
+            loc: p.node.loc.end.line - p.node.loc.start.line
+          });
+        }
+      }
+    }
+  });
+
+  // Find hook definitions
+  traverse(ast, {
+    FunctionDeclaration(p) {
+      if (p.node.id && p.node.id.name.startsWith("use")) {
+        analysis.hooks.push({
+          name: p.node.id.name,
+          loc: p.node.loc.end.line - p.node.loc.start.line
+        });
+      }
+    },
+    VariableDeclarator(p) {
+      if (p.node.id.type === "Identifier" && p.node.id.name.startsWith("use")) {
+        if (p.node.init && (p.node.init.type === "ArrowFunctionExpression" || p.node.init.type === "FunctionExpression")) {
+          analysis.hooks.push({
+            name: p.node.id.name,
+            loc: p.node.loc.end.line - p.node.loc.start.line
+          });
+        }
+      }
+    }
+  });
+
+  // Find JSX usage (component rendering)
+  traverse(ast, {
+    JSXElement(p) {
+      const elementName = jsxName(p.node.openingElement.name);
+      if (elementName && /^[A-Z]/.test(elementName)) {
+        analysis.renders.push(elementName);
+      }
+    }
+  });
+
+  // Find function calls (hooks, utilities)
+  traverse(ast, {
+    CallExpression(p) {
+      const callee = p.node.callee;
+      if (callee.type === "Identifier") {
+        if (callee.name.startsWith("use")) {
+          analysis.calls.push(callee.name);
+        }
+      }
+    }
+  });
+
+  return { ...analysis, loc, code };
+}
 
 function jsxName(node) {
   if (!node) return null;
@@ -71,494 +480,285 @@ function walkFiles(startDir, out) {
   }
 }
 
-function collectPathsReact() {
-  const src = path.join(rootDir, "src");
-  const start = fs.existsSync(src) && fs.statSync(src).isDirectory() ? src : rootDir;
-  console.error(`[DEBUG] collectPathsReact: starting from ${start}`);
-  const out = [];
-  walkFiles(start, out);
-  console.error(`[DEBUG] collectPathsReact: found ${out.length} JS-like files`);
-  return out;
-}
-
-function collectPathsVanilla() {
-  console.error(`[DEBUG] collectPathsVanilla: starting from ${rootDir}`);
-  const out = [];
-  walkFiles(rootDir, out);
-  console.error(`[DEBUG] collectPathsVanilla: found ${out.length} JS-like files`);
-  return out;
-}
-
-function buildImportMap(ast, fromRel, rootAbs) {
-  /** @type {Record<string, string>} localName -> resolved rel path */
-  const imports = {};
-  traverse(ast, {
-    ImportDeclaration(p) {
-      const src = p.node.source && p.node.source.value;
-      if (typeof src !== "string") return;
-      const resolved = resolveModuleToRelPath(rootAbs, fromRel, src);
-      if (!resolved) return;
-      for (const spec of p.node.specifiers || []) {
-        // Skip type imports - they can't be used in JSX
-        if (spec.importKind === "type" || spec.importKind === "typeof") {
-          continue;
-        }
-        if (spec.type === "ImportDefaultSpecifier") {
-          imports[spec.local.name] = resolved;
-        } else if (spec.type === "ImportSpecifier") {
-          imports[spec.local.name] = resolved;
-        } else if (spec.type === "ImportNamespaceSpecifier") {
-          imports[spec.local.name] = resolved;
-        }
-      }
-    },
-  });
-  return imports;
-}
-
-function analyzeComponentImports(code, ext, fromRel, rootAbs, merged) {
-  let ast;
-  try {
-    ast = parser.parse(code, {
-      sourceType: "module",
-      allowImportExportEverywhere: true,
-      plugins: getParserPlugins(ext),
-    });
-  } catch {
-    return {};
-  }
-
-  const imports = buildImportMap(ast, fromRel, rootAbs);
-  console.error(`[DEBUG] Found imports in ${fromRel}:`, imports);
-
-  const usageMap = new Map(); // Track which imported items are actually used and where
-
-  // Find all usages of imported identifiers and track the containing function
-  traverse(ast, {
-    Identifier(p) {
-      const name = p.node.name;
-      if (imports[name]) {
-        // Check if this is not a declaration/binding
-        let isBinding = false;
-        let scope = p.scope;
-        while (scope) {
-          if (scope.hasBinding(name)) {
-            isBinding = true;
-            break;
-          }
-          scope = scope.parent;
-        }
-
-        if (!isBinding) {
-          // Find the containing function/component where this import is used
-          let containingFunction = null;
-          let current = p.parent; // Start from parent to avoid the identifier itself
-          while (current && !containingFunction) {
-            if (current.node && current.node.type === "FunctionDeclaration" && current.node.id) {
-              containingFunction = current.node.id.name;
-            } else if (current.node && current.node.type === "VariableDeclarator" && current.node.id && current.node.id.type === "Identifier") {
-              // Check if this is a function expression or arrow function
-              if (current.node.init && (
-                current.node.init.type === "FunctionExpression" ||
-                current.node.init.type === "ArrowFunctionExpression"
-              )) {
-                containingFunction = current.node.id.name;
-              }
-            } else if (current.node && current.node.type === "ClassDeclaration" && current.node.id) {
-              containingFunction = current.node.id.name;
-            }
-            current = current.parent;
-          }
-
-          if (containingFunction) {
-            const importedFile = imports[name];
-            const componentKey = `${importedFile}::${name}`;
-            const usageKey = `${fromRel}::${containingFunction}`;
-
-            if (!usageMap.has(name)) {
-              usageMap.set(name, { componentKey, usageLocations: new Set() });
-            }
-            usageMap.get(name).usageLocations.add(usageKey);
-
-            console.error(`[DEBUG] Found usage of imported ${name} from ${importedFile} in function ${containingFunction} (${usageKey})`);
-          } else {
-            console.error(`[DEBUG] Found usage of imported ${name} from ${imports[name]} but couldn't determine containing function`);
-          }
-        }
-      }
-    },
-    JSXElement(p) {
-      // Check if this JSX element uses an imported component
-      const elementName = jsxName(p.node.openingElement.name);
-      if (elementName && imports[elementName]) {
-        // Find the containing function/component where this JSX element is used
-        let containingFunction = null;
-        
-        // Try to find a function declaration in the ancestors
-        const functionDecl = p.findParent((path) => 
-          path.node.type === "FunctionDeclaration" && path.node.id
-        );
-        if (functionDecl) {
-          containingFunction = functionDecl.node.id.name;
-        } else {
-          // Try arrow function or function expression
-          const arrowFunc = p.findParent((path) => 
-            path.node.type === "VariableDeclarator" && 
-            path.node.id && 
-            path.node.id.type === "Identifier" &&
-            path.node.init && (
-              path.node.init.type === "FunctionExpression" ||
-              path.node.init.type === "ArrowFunctionExpression"
-            )
-          );
-          if (arrowFunc) {
-            containingFunction = arrowFunc.node.id.name;
-          } else {
-            // Try class method
-            const classMethod = p.findParent((path) => 
-              path.node.type === "ClassMethod" || 
-              path.node.type === "ClassDeclaration"
-            );
-            if (classMethod && classMethod.node.id) {
-              containingFunction = classMethod.node.id.name;
-            }
-          }
-        }
-
-        if (containingFunction) {
-          const importedFile = imports[elementName];
-          const componentKey = `${importedFile}::${elementName}`;
-          const usageKey = `${fromRel}::${containingFunction}`;
-
-          if (!usageMap.has(elementName)) {
-            usageMap.set(elementName, { componentKey, usageLocations: new Set() });
-          }
-          usageMap.get(elementName).usageLocations.add(usageKey);
-
-          console.error(`[DEBUG] Found JSX usage of imported ${elementName} from ${importedFile} in function ${containingFunction} (${usageKey})`);
-        } else {
-          console.error(`[DEBUG] Found JSX usage of imported ${elementName} from ${imports[elementName]} but couldn't determine containing function`);
-        }
-      }
-    },
-  });
-
-  console.error(`[DEBUG] Usage map for ${fromRel}:`, Object.fromEntries(
-    Array.from(usageMap.entries()).map(([name, data]) => [
-      name,
-      { componentKey: data.componentKey, usageLocations: Array.from(data.usageLocations) }
-    ])
-  ));
-
-  // Create import relationship nodes for all used imports
-  let relationshipsCreated = 0;
-  for (const [name, data] of usageMap) {
-    const importKey = `${fromRel}::import_${name}`;
-    if (merged[importKey]) {
-      console.error(`[DEBUG] WARNING: Import relationship ${importKey} already exists!`);
-      continue;
-    }
-    merged[importKey] = {
-      callees: [],
-      code: `// Import: ${name} from ${imports[name]}`,
-      kind: "import",
-    };
-
-    // Connect import to the actual component
-    if (!merged[importKey].callees.includes(data.componentKey)) {
-      merged[importKey].callees.push(data.componentKey);
-      relationshipsCreated++;
-    }
-
-    // Connect the functions that use this import to the import node
-    for (const usageLocation of data.usageLocations) {
-      if (merged[usageLocation]) {
-        if (!merged[usageLocation].callees.includes(importKey)) {
-          merged[usageLocation].callees.push(importKey);
-          console.error(`[DEBUG] Connected usage location ${usageLocation} to import ${importKey}`);
-        }
-      } else {
-        console.error(`[DEBUG] WARNING: Usage location ${usageLocation} not found in merged graph`);
-      }
-    }
-  }
-
-  console.error(`[DEBUG] Created ${relationshipsCreated} import relationships from ${usageMap.size} used imports in ${fromRel}`);
-
-  // Also identify exported functions as potential entry points
-  traverse(ast, {
-    ExportNamedDeclaration(p) {
-      if (p.declaration && p.declaration.type === "FunctionDeclaration") {
-        const fnName = p.declaration.id.name;
-        const exportKey = `${fromRel}::${fnName}`;
-        if (merged[exportKey]) {
-          // Mark as potential entry point
-          merged[exportKey].code = merged[exportKey].code.replace(/^\/\//, "// [EXPORT] ");
-        }
-      }
-    },
-    ExportDefaultDeclaration(p) {
-      if (p.declaration && p.declaration.type === "FunctionDeclaration") {
-        const fnName = p.declaration.id.name;
-        const exportKey = `${fromRel}::${fnName}`;
-        if (merged[exportKey]) {
-          merged[exportKey].code = merged[exportKey].code.replace(/^\/\//, "// [DEFAULT EXPORT] ");
-        }
-      }
-    },
-  });
-
-  return imports;
-}
-
 function main() {
-  console.error(`[DEBUG] Starting parseProject with rootDir: ${rootDir}, mode: ${mode}`);
+  console.error(`[DEBUG] Starting enhanced parseProject with rootDir: ${rootDir}, mode: ${mode}`);
+
   if (!rootDir || !fs.existsSync(rootDir)) {
     console.error(JSON.stringify({ error: "Invalid root directory" }));
     process.exit(1);
   }
 
-  const files =
-    mode === "vanilla" ? collectPathsVanilla() : collectPathsReact();
-  console.error(`[DEBUG] Collected ${files.length} files to parse:`, files.map(f => path.relative(rootDir, f)));
+  // Step 1: Detect project type and find entry point
+  const projectType = detectProjectType(rootDir);
+  console.error(`[DEBUG] Detected project type: ${projectType}`);
 
-  const merged = {};
-  const rootAbs = path.resolve(rootDir);
-  console.error(`[DEBUG] Root absolute path: ${rootAbs}`);
-
-  // Step 1: First identify and process routing files to create route nodes
-  console.error(`[DEBUG] Step 1: Identifying routing files and creating route nodes...`);
-  const routingFiles = [];
-  const nonRoutingFiles = [];
-
-  for (const filePath of files) {
-    let code;
-    try {
-      code = fs.readFileSync(filePath, "utf-8");
-    } catch {
-      continue;
-    }
-    if (code.includes("Route") || code.includes("BrowserRouter") || code.includes("Routes")) {
-      routingFiles.push(filePath);
-    } else {
-      nonRoutingFiles.push(filePath);
-    }
+  const entryPoint = findEntryPoint(rootDir, projectType);
+  if (!entryPoint) {
+    console.error(JSON.stringify({ error: "Could not find entry point for project type: " + projectType }));
+    process.exit(1);
   }
+  console.error(`[DEBUG] Found entry point: ${entryPoint}`);
 
-  console.error(`[DEBUG] Found ${routingFiles.length} routing files and ${nonRoutingFiles.length} non-routing files`);
+  // Step 2: Resolve path aliases
+  const aliases = resolvePathAliases(rootDir, projectType);
 
-  // Create main route entry point '/'
-  const mainRouteId = "route:/";
-  merged[mainRouteId] = {
-    callees: [],
-    code: "// Main application entry route",
-    kind: "route",
-  };
-  console.error(`[DEBUG] Created main route node: ${mainRouteId}`);
-
-  // Process routing files first to extract routes
-  for (const filePath of routingFiles) {
-    const rel = path.relative(rootAbs, filePath).replace(/\\/g, "/");
-    const ext = path.extname(filePath).toLowerCase();
-    console.error(`[DEBUG] Processing routing file: ${rel}`);
-    let code;
-    try {
-      code = fs.readFileSync(filePath, "utf-8");
-    } catch {
-      console.error(`[DEBUG] Failed to read routing file: ${rel}`);
-      continue;
-    }
-
-    // Extract routes and create route nodes
-    wireRoutesIntoMerged(code, ext, rel, rootAbs, merged);
-
-    // Also extract functions from routing files
-    let partial;
-    try {
-      partial = parseSourceToFunctions(code, ext);
-      console.error(`[DEBUG] Parsed ${Object.keys(partial).length} functions from routing file ${rel}:`, Object.keys(partial));
-    } catch (e) {
-      console.error(`[DEBUG] Failed to parse routing file: ${rel}, error: ${e.message}`);
-      continue;
-    }
-    for (const [fnName, data] of Object.entries(partial)) {
-      const key = `${rel}::${fnName}`;
-      if (merged[key]) {
-        console.error(`[DEBUG] WARNING: Duplicate function key ${key} already exists in routing files!`);
-        console.error(`[DEBUG] Existing:`, merged[key]);
-        console.error(`[DEBUG] New:`, data);
-        continue;
+  // Step 3: Collect all relevant files
+  const files = [];
+  function collectFiles(dir) {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!IGNORE_DIRS.has(entry.name) && !entry.name.startsWith(".")) {
+          collectFiles(fullPath);
+        }
+      } else {
+        const ext = path.extname(entry.name).toLowerCase();
+        if (JS_LIKE.has(ext) && !shouldSkipFile(fullPath)) {
+          files.push(fullPath);
+        }
       }
-      merged[key] = {
-        callees: data.callees,
-        code: data.code,
-      };
-      console.error(`[DEBUG] Added function: ${key} with ${data.callees.length} callees:`, data.callees);
     }
-
-    // Analyze component imports in routing files
-    const beforeCount = Object.keys(merged).filter(k => merged[k].kind === "import").length;
-    const importMap = analyzeComponentImports(code, ext, rel, rootAbs, merged);
-    const afterCount = Object.keys(merged).filter(k => merged[k].kind === "import").length;
-    console.error(`[DEBUG] Analyzed ${Object.keys(importMap).length} imports in routing file ${rel}, created ${afterCount - beforeCount} import relationships`);
   }
 
-  // Step 2: Process remaining files for function extraction
-  console.error(`[DEBUG] Step 2: Processing remaining files for function extraction...`);
-  for (const filePath of nonRoutingFiles) {
-    const rel = path.relative(rootAbs, filePath).replace(/\\/g, "/");
-    const ext = path.extname(filePath).toLowerCase();
-    console.error(`[DEBUG] Processing file: ${rel}`);
-    let code;
-    try {
-      code = fs.readFileSync(filePath, "utf-8");
-    } catch {
-      console.error(`[DEBUG] Failed to read file: ${rel}`);
-      continue;
-    }
-    let partial;
-    try {
-      partial = parseSourceToFunctions(code, ext);
-      console.error(`[DEBUG] Parsed ${Object.keys(partial).length} functions from ${rel}:`, Object.keys(partial));
-    } catch (e) {
-      console.error(`[DEBUG] Failed to parse file: ${rel}, error: ${e.message}`);
-      continue;
-    }
-    for (const [fnName, data] of Object.entries(partial)) {
-      const key = `${rel}::${fnName}`;
-      if (merged[key]) {
-        console.error(`[DEBUG] WARNING: Duplicate function key ${key} already exists in non-routing files!`);
-        console.error(`[DEBUG] Existing:`, merged[key]);
-        console.error(`[DEBUG] New:`, data);
-        continue;
-      }
-      merged[key] = {
-        callees: data.callees,
-        code: data.code,
-      };
-      console.error(`[DEBUG] Added function: ${key} with ${data.callees.length} callees:`, data.callees);
-    }
+  const clientSrcDir = path.join(rootDir, "client", "src");
+  const srcDir = path.join(rootDir, "src");
 
-    // Analyze component imports
-    const beforeCount = Object.keys(merged).filter(k => merged[k].kind === "import").length;
-    const importMap = analyzeComponentImports(code, ext, rel, rootAbs, merged);
-    const afterCount = Object.keys(merged).filter(k => merged[k].kind === "import").length;
-    console.error(`[DEBUG] Analyzed ${Object.keys(importMap).length} imports in ${rel}, created ${afterCount - beforeCount} import relationships`);
-  }
-
-  console.error(`[DEBUG] Finished function extraction. Total merged functions: ${Object.keys(merged).length}`);
-
-  // Step 3: Final route wiring pass to ensure all route-component links are established
-  console.error(`[DEBUG] Step 3: Final route wiring pass...`);
-  let routeWiringCount = 0;
-  for (const filePath of files) {
-    const rel = path.relative(rootAbs, filePath).replace(/\\/g, "/");
-    const ext = path.extname(filePath).toLowerCase();
-    let code;
-    try {
-      code = fs.readFileSync(filePath, "utf-8");
-    } catch {
-      continue;
-    }
-    if (!code.includes("Route")) {
-      console.error(`[DEBUG] Skipping ${rel} for route wiring (no 'Route' found)`);
-      continue;
-    }
-    console.error(`[DEBUG] Processing route wiring for file: ${rel}`);
-    routeWiringCount++;
-    const routeWiringResult = wireRoutesIntoMerged(code, ext, rel, rootAbs, merged);
-    console.error(`[DEBUG] Route wiring completed for ${rel}`);
-  }
-  console.error(`[DEBUG] Processed route wiring for ${routeWiringCount} files`);
-
-  // Link main route to the first route found or main App component
-  const routeKeys = Object.keys(merged).filter(k => k.startsWith("route:") && k !== mainRouteId);
-  console.error(`[DEBUG] Available route keys:`, routeKeys);
-  if (routeKeys.length > 0) {
-    // Link main route to the first route (usually '/' or index route)
-    const firstRoute = routeKeys.find(k => k === "route:/") || routeKeys[0];
-    console.error(`[DEBUG] Selected first route: ${firstRoute}`);
-    if (firstRoute && !merged[mainRouteId].callees.includes(firstRoute)) {
-      merged[mainRouteId].callees.push(firstRoute);
-      console.error(`[DEBUG] Linked main route ${mainRouteId} to: ${firstRoute}`);
-    }
+  // Collect files from client/src if it exists (monorepo), otherwise from src/
+  if (fs.existsSync(clientSrcDir)) {
+    collectFiles(clientSrcDir);
+  } else if (fs.existsSync(srcDir)) {
+    collectFiles(srcDir);
   } else {
-    console.error(`[DEBUG] WARNING: No route keys found to link to main route`);
+    collectFiles(rootDir);
   }
 
-  console.error(`[DEBUG] Finished route wiring. Final merged functions: ${Object.keys(merged).length}`);
+  console.error(`[DEBUG] Collected ${files.length} files to analyze`);
 
-  // Count import relationships
-  const importNodes = Object.keys(merged).filter(k => merged[k].kind === "import");
-  console.error(`[DEBUG] Created ${importNodes.length} import relationship nodes`);
+  // Step 4: Analyze all files
+  const fileAnalyses = new Map();
+  const allImports = new Map(); // import name -> Set of files that import it
 
-  // Identify potential entry points (functions with no callers)
-  const allCallers = new Set();
-  for (const [key, data] of Object.entries(merged)) {
-    for (const callee of data.callees || []) {
-      allCallers.add(callee);
+  for (const filePath of files) {
+    const analysis = analyzeFile(filePath, rootDir, aliases);
+    if (analysis) {
+      const relPath = path.relative(rootDir, filePath).replace(/\\/g, "/");
+      fileAnalyses.set(relPath, analysis);
+
+      // Track imports for cross-referencing
+      for (const imp of analysis.imports) {
+        if (!allImports.has(imp.name)) {
+          allImports.set(imp.name, new Set());
+        }
+        allImports.get(imp.name).add(relPath);
+      }
     }
   }
 
-  const potentialEntryPoints = Object.keys(merged).filter(
-    k => !allCallers.has(k) && !k.startsWith("route:") && merged[k].kind !== "import"
-  );
-  console.error(`[DEBUG] Identified ${potentialEntryPoints.length} potential entry points (functions with no callers):`, potentialEntryPoints);
+  console.error(`[DEBUG] Analyzed ${fileAnalyses.size} files successfully`);
 
-  // Identify orphaned functions (functions that call others but are not called)
-  const allFunctions = Object.keys(merged).filter(k => !k.startsWith("route:") && merged[k].kind !== "import");
-  const orphanedFunctions = allFunctions.filter(k => !allCallers.has(k));
-  console.error(`[DEBUG] Orphaned functions (potential entry points):`, orphanedFunctions);
+  // Step 5: Build D3.js graph structure
+  const nodes = [];
+  const links = [];
+  const visited = new Set();
+  const nodeIdMap = new Map(); // file path -> node id
 
-  // Show all connections
-  console.error(`[DEBUG] === CONNECTION SUMMARY ===`);
-  for (const [key, data] of Object.entries(merged)) {
-    if (data.callees && data.callees.length > 0) {
-      console.error(`[DEBUG] ${key} calls:`, data.callees);
-    } else if (!key.startsWith("route:") || key === "route:/") {
-      console.error(`[DEBUG] ${key} has no outgoing connections`);
+  // Create root node
+  const rootNode = {
+    id: entryPoint,
+    label: path.basename(entryPoint),
+    type: "file",
+    group: 1,
+    depth: 0,
+    loc: fileAnalyses.get(entryPoint)?.loc || 0,
+    exports: fileAnalyses.get(entryPoint)?.exports || [],
+    code: fileAnalyses.get(entryPoint)?.code || ""
+  };
+  nodes.push(rootNode);
+  nodeIdMap.set(entryPoint, entryPoint);
+  visited.add(entryPoint);
+
+  // BFS to build graph
+  const queue = [{ file: entryPoint, depth: 0 }];
+  let queueIndex = 0;
+
+  while (queueIndex < queue.length) {
+    const { file, depth } = queue[queueIndex++];
+    const analysis = fileAnalyses.get(file);
+
+    if (!analysis) continue;
+
+    // Process imports
+    for (const imp of analysis.imports) {
+      if (!imp.from || imp.from.includes("node_modules")) continue;
+
+      // Resolve barrel files
+      let targetFile = imp.from;
+      if (targetFile.endsWith("/index")) {
+        // Look for actual file in the directory
+        const dirPath = path.join(rootDir, targetFile);
+        if (fs.existsSync(dirPath + ".js")) targetFile += ".js";
+        else if (fs.existsSync(dirPath + ".jsx")) targetFile += ".jsx";
+        else if (fs.existsSync(dirPath + ".ts")) targetFile += ".ts";
+        else if (fs.existsSync(dirPath + ".tsx")) targetFile += ".tsx";
+      }
+
+      // Create target node if it doesn't exist
+      if (!nodeIdMap.has(targetFile) && fileAnalyses.has(targetFile)) {
+        const targetAnalysis = fileAnalyses.get(targetFile);
+        const nodeType = targetAnalysis.components.length > 0 ? "component" :
+                        targetAnalysis.hooks.length > 0 ? "hook" : "file";
+
+        const newNode = {
+          id: targetFile,
+          label: path.basename(targetFile),
+          type: nodeType,
+          group: getGroupNumber(targetFile),
+          depth: depth + 1,
+          loc: targetAnalysis.loc,
+          exports: targetAnalysis.exports,
+          code: targetAnalysis.code || ""
+        };
+
+        nodes.push(newNode);
+        nodeIdMap.set(targetFile, targetFile);
+        queue.push({ file: targetFile, depth: depth + 1 });
+      }
+
+      // Create import link
+      if (nodeIdMap.has(targetFile)) {
+        links.push({
+          source: file,
+          target: targetFile,
+          type: "imports",
+          value: 1
+        });
+      }
+    }
+
+    // Process component renders
+    for (const render of analysis.renders) {
+      // Find which file exports this component
+      for (const [otherFile, otherAnalysis] of fileAnalyses) {
+        if (otherAnalysis.exports.includes(render) || otherAnalysis.components.some(c => c.name === render)) {
+          if (!nodeIdMap.has(otherFile)) {
+            const nodeType = otherAnalysis.components.length > 0 ? "component" : "file";
+            const newNode = {
+              id: otherFile,
+              label: path.basename(otherFile),
+              type: nodeType,
+              group: getGroupNumber(otherFile),
+              depth: depth + 1,
+              loc: otherAnalysis.loc,
+              exports: otherAnalysis.exports,
+              code: otherAnalysis.code || ""
+            };
+            nodes.push(newNode);
+            nodeIdMap.set(otherFile, otherFile);
+            queue.push({ file: otherFile, depth: depth + 1 });
+          }
+
+          links.push({
+            source: file,
+            target: otherFile,
+            type: "renders",
+            value: 3
+          });
+          break;
+        }
+      }
+    }
+
+    // Process hook calls
+    for (const call of analysis.calls) {
+      // Find which file exports this hook
+      for (const [otherFile, otherAnalysis] of fileAnalyses) {
+        if (otherAnalysis.exports.includes(call) || otherAnalysis.hooks.some(h => h.name === call)) {
+          if (!nodeIdMap.has(otherFile)) {
+            const newNode = {
+              id: otherFile,
+              label: path.basename(otherFile),
+              type: "hook",
+              group: 4,
+              depth: depth + 1,
+              loc: otherAnalysis.loc,
+              exports: otherAnalysis.exports,
+              code: otherAnalysis.code || ""
+            };
+            nodes.push(newNode);
+            nodeIdMap.set(otherFile, otherFile);
+            queue.push({ file: otherFile, depth: depth + 1 });
+          }
+
+          links.push({
+            source: file,
+            target: otherFile,
+            type: "calls",
+            value: 2
+          });
+          break;
+        }
+      }
     }
   }
 
-  // Identify truly unconnected functions (no incoming OR outgoing connections)
-  const unconnectedFunctions = [];
-  for (const [key, data] of Object.entries(merged)) {
-    if (key.startsWith("route:") && key !== "route:/") continue;
-    if (data.kind === "import") continue;
-    const hasOutgoing = (data.callees || []).length > 0;
-    const hasIncoming = allCallers.has(key);
-    if (!hasOutgoing && !hasIncoming) {
-      unconnectedFunctions.push(key);
+  // Step 6: Detect circular imports
+  const circularLinks = [];
+  for (const link of links) {
+    // Simple cycle detection - check if target eventually leads back to source
+    const visitedInPath = new Set();
+    const stack = [link.target];
+
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (visitedInPath.has(current)) continue;
+      visitedInPath.add(current);
+
+      if (current === link.source) {
+        // Found cycle
+        link.circular = true;
+        circularLinks.push(link);
+        break;
+      }
+
+      // Add predecessors
+      for (const otherLink of links) {
+        if (otherLink.target === current) {
+          stack.push(otherLink.source);
+        }
+      }
     }
   }
-  console.error(`[DEBUG] Truly unconnected functions (${unconnectedFunctions.length}):`, unconnectedFunctions);
+
+  console.error(`[DEBUG] Detected ${circularLinks.length} circular import links`);
+
+  // Step 7: Final output
+  const result = {
+    projectType,
+    entryPoint,
+    nodes,
+    links,
+    stats: {
+      totalFiles: files.length,
+      analyzedFiles: fileAnalyses.size,
+      totalNodes: nodes.length,
+      totalLinks: links.length,
+      circularLinks: circularLinks.length,
+      maxDepth: Math.max(...nodes.map(n => n.depth))
+    }
+  };
 
   console.error(`[DEBUG] === FINAL STATS ===`);
-  console.error(`[DEBUG] Total functions: ${Object.keys(merged).length}`);
-  console.error(`[DEBUG] Route nodes: ${Object.keys(merged).filter(k => k.startsWith("route:")).length}`);
-  console.error(`[DEBUG] Import nodes: ${Object.keys(merged).filter(k => merged[k].kind === "import").length}`);
-  console.error(`[DEBUG] Regular functions: ${Object.keys(merged).filter(k => !k.startsWith("route:") && merged[k].kind !== "import").length}`);
-  console.error(`[DEBUG] Functions with outgoing connections: ${Object.keys(merged).filter(k => (merged[k].callees || []).length > 0).length}`);
-  console.error(`[DEBUG] Functions with incoming connections: ${Array.from(allCallers).length}`);
-  console.error(`[DEBUG] Truly unconnected functions: ${unconnectedFunctions.length}`);
+  console.error(`[DEBUG] Project type: ${projectType}`);
+  console.error(`[DEBUG] Entry point: ${entryPoint}`);
+  console.error(`[DEBUG] Total files collected: ${files.length}`);
+  console.error(`[DEBUG] Files successfully analyzed: ${fileAnalyses.size}`);
+  console.error(`[DEBUG] Graph nodes: ${nodes.length}`);
+  console.error(`[DEBUG] Graph links: ${links.length}`);
+  console.error(`[DEBUG] Circular links detected: ${circularLinks.length}`);
+  console.error(`[DEBUG] Maximum depth: ${result.stats.maxDepth}`);
 
-  console.error(`[DEBUG] === FINAL VALIDATION ===`);
-  const allKeys = Object.keys(merged);
-  const uniqueKeys = new Set(allKeys);
-  if (allKeys.length !== uniqueKeys.size) {
-    console.error(`[DEBUG] ERROR: Found duplicate keys in merged object!`);
-    const keyCounts = {};
-    for (const key of allKeys) {
-      keyCounts[key] = (keyCounts[key] || 0) + 1;
-    }
-    const duplicates = Object.entries(keyCounts).filter(([_, count]) => count > 1);
-    console.error(`[DEBUG] Duplicate keys:`, duplicates);
-  } else {
-    console.error(`[DEBUG] All ${allKeys.length} keys are unique ✓`);
-  }
-
-  console.error(`[DEBUG] Outputting final JSON result...`);
-  console.log(JSON.stringify(merged));
+  console.log(JSON.stringify(result, null, 2));
 }
 
 main();
