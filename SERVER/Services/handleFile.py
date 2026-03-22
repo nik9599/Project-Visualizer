@@ -6,10 +6,10 @@ import tempfile
 import zipfile
 from flask import jsonify
 
-# Absolute paths (sit next to this file in Services/)
+# Absolute paths (parsers are in the Parser/ directory)
 _SERVICES_DIR = os.path.dirname(os.path.abspath(__file__))
-PARSER_PATH = os.path.join(_SERVICES_DIR, "parser.js")
-PARSE_PROJECT_PATH = os.path.join(_SERVICES_DIR, "parseProject.js")
+PARSER_PATH = os.path.join(_SERVICES_DIR, "..", "Parser", "parser.js")
+PARSE_PROJECT_PATH = os.path.join(_SERVICES_DIR, "..", "Parser", "parseProject.js")
 
 # project_type from multipart form: "single" | "react" | "vanilla"
 
@@ -52,7 +52,6 @@ def uploadFile(file, project_type: str = "single"):
         return jsonify({"error": str(e)}), 500
     finally:
         os.unlink(tmp_path)
-
     graph = format_for_graph(result)
 
     payload: dict = {
@@ -87,19 +86,21 @@ def _handle_zip_project(file, filename: str, mode: str):
     root = _find_project_root(extract_dir)
 
     try:
-        result = analyze_project(root, mode)
+        result, debug_logs = analyze_project(root, mode)
     except Exception as e:
         shutil.rmtree(extract_dir, ignore_errors=True)
         return jsonify({"error": str(e)}), 500
 
     shutil.rmtree(extract_dir, ignore_errors=True)
-
+    print("result: ", result)
+    print("debug_logs: ", debug_logs)
     graph = format_for_graph(result)
 
     payload: dict = {
         "filename": filename,
         "project_type": mode,
         "graph": graph,
+        "debug_logs": debug_logs,
     }
     if not graph.get("nodes"):
         payload["hint"] = (
@@ -219,8 +220,8 @@ def analyze_js(file_path: str) -> dict:
     return json.loads(proc.stdout)
 
 
-def analyze_project(root_dir: str, mode: str) -> dict:
-    """Run parseProject.js on a directory (react or vanilla)."""
+def analyze_project(root_dir: str, mode: str) -> tuple[dict, str]:
+    """Run parseProject.js on a directory (react or vanilla). Returns (result_dict, stderr_logs)"""
     proc = subprocess.run(
         ["node", PARSE_PROJECT_PATH, root_dir, mode],
         capture_output=True,
@@ -236,4 +237,4 @@ def analyze_project(root_dir: str, mode: str) -> dict:
             f"Project parser produced no output. stderr: {proc.stderr.strip()}"
         )
 
-    return json.loads(proc.stdout)
+    return json.loads(proc.stdout), proc.stderr

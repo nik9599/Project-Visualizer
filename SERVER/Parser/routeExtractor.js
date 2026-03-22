@@ -137,21 +137,39 @@ function normalizeRouteId(p) {
  * Pick graph key for component: exact file::Name, else unique suffix match.
  */
 function findGraphKey(merged, resolvedFile, componentName) {
+  console.error(`[ROUTE_DEBUG] Finding graph key for ${componentName}, resolvedFile: ${resolvedFile}`);
   if (resolvedFile) {
     const k = `${resolvedFile}::${componentName}`;
-    if (merged[k]) return k;
+    console.error(`[ROUTE_DEBUG] Checking exact match: ${k}`);
+    if (merged[k]) {
+      console.error(`[ROUTE_DEBUG] Found exact match: ${k}`);
+      return k;
+    }
   }
   const suf = `::${componentName}`;
   const hits = Object.keys(merged).filter(
     (key) => key.endsWith(suf) && !key.startsWith("route:")
   );
-  if (hits.length === 1) return hits[0];
+  console.error(`[ROUTE_DEBUG] Found ${hits.length} suffix matches for ${componentName}:`, hits);
+  if (hits.length === 1) {
+    console.error(`[ROUTE_DEBUG] Using single suffix match: ${hits[0]}`);
+    return hits[0];
+  }
   if (hits.length > 1 && resolvedFile) {
     const pref = resolvedFile.replace(/\/[^/]+$/, "");
+    console.error(`[ROUTE_DEBUG] Multiple matches, checking prefix ${pref}`);
     const prefer = hits.find((h) => h.startsWith(pref));
-    if (prefer) return prefer;
+    if (prefer) {
+      console.error(`[ROUTE_DEBUG] Found preferred match with prefix: ${prefer}`);
+      return prefer;
+    }
   }
-  return hits[0] ?? null;
+  if (hits.length > 0) {
+    console.error(`[ROUTE_DEBUG] Using first match: ${hits[0]}`);
+    return hits[0];
+  }
+  console.error(`[ROUTE_DEBUG] No matches found for ${componentName}`);
+  return null;
 }
 
 /**
@@ -176,21 +194,37 @@ function wireRoutesIntoMerged(code, ext, fromRel, rootAbs, merged) {
   const imports = buildImportMap(ast, fromRel, rootAbs);
   const routes = extractRoutesFromAst(ast);
 
+  console.error(`[ROUTE_DEBUG] Processing routes in ${fromRel}`);
+  console.error(`[ROUTE_DEBUG] Found ${routes.length} routes:`, routes);
+  console.error(`[ROUTE_DEBUG] Import map:`, imports);
+
   for (const r of routes) {
     const resolvedFile = imports[r.componentName] || null;
     const targetId = findGraphKey(merged, resolvedFile, r.componentName);
-    if (!targetId) continue;
+    console.error(`[ROUTE_DEBUG] Route ${r.path} -> ${r.componentName}: resolvedFile=${resolvedFile}, targetId=${targetId}`);
+
+    if (!targetId) {
+      console.error(`[ROUTE_DEBUG] WARNING: Could not find target for route ${r.path} component ${r.componentName}`);
+      continue;
+    }
 
     const routeId = normalizeRouteId(r.path);
-    if (!merged[routeId]) {
+    if (merged[routeId]) {
+      console.error(`[ROUTE_DEBUG] WARNING: Route ${routeId} already exists!`);
+      // Still try to add the callee if it's not already there
+      if (!merged[routeId].callees.includes(targetId)) {
+        merged[routeId].callees.push(targetId);
+        console.error(`[ROUTE_DEBUG] Added additional callee ${targetId} to existing route ${routeId}`);
+      }
+    } else {
       merged[routeId] = {
         callees: [],
         code: `// Route entry → ${r.componentName}`,
         kind: "route",
       };
-    }
-    if (!merged[routeId].callees.includes(targetId)) {
+      console.error(`[ROUTE_DEBUG] Created route node: ${routeId}`);
       merged[routeId].callees.push(targetId);
+      console.error(`[ROUTE_DEBUG] Linked ${routeId} -> ${targetId}`);
     }
   }
 }

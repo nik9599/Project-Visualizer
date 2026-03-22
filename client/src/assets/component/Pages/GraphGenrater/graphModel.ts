@@ -35,6 +35,8 @@ export type ParsedGraph = {
   links: RawEdge[];
   /** Optional server message when the graph is empty or ambiguous */
   hint?: string;
+  /** Debug logs from the parser */
+  debug_logs?: string;
 };
 
 export function parseGraphPayload(data: unknown): ParsedGraph | null {
@@ -86,6 +88,17 @@ export function parseGraphPayload(data: unknown): ParsedGraph | null {
         label: pathPart ? `Route ${pathPart}` : "Route /",
         kind: n.kind ?? "route",
       });
+    } else if (n.id.includes("::import_")) {
+      // Handle import nodes: format is "file::import_componentName"
+      const parts = n.id.split("::import_");
+      if (parts.length === 2) {
+        const componentName = parts[1];
+        nodeMap.set(n.id, {
+          ...n,
+          label: `Import ${componentName}`,
+          kind: n.kind ?? "import",
+        });
+      }
     }
   }
 
@@ -94,11 +107,14 @@ export function parseGraphPayload(data: unknown): ParsedGraph | null {
 
   const hint = typeof o.hint === "string" ? o.hint : undefined;
 
+  const debug_logs = typeof o.debug_logs === "string" ? o.debug_logs : undefined;
+
   return {
     filename,
     nodes: Array.from(nodeMap.values()),
     links: rawEdges.map((e) => ({ source: e.source, target: e.target })),
-    ...(hint !== undefined ? { hint } : {}),
+    ...(hint ? { hint } : {}),
+    ...(debug_logs ? { debug_logs } : {}),
   };
 }
 

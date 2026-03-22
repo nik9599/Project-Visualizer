@@ -26,6 +26,8 @@ export const lightGraphTheme = {
   nodeExternal: "#64748b",
   /** Synthetic React Router path entries */
   nodeRoute: "#059669",
+  /** Import relationship nodes */
+  nodeImport: "#7c3aed",
   nodeInternal: "#0ea5e9",
   nodeStroke: "#ffffff",
   nodeStrokeStrong: "#e2e8f0",

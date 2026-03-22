@@ -3,6 +3,7 @@ import * as d3 from "d3";
 import { CallGraphCanvas } from "./CallGraphCanvas";
 import { GraphToolbar } from "./GraphToolbar";
 import { SourcePanel } from "./SourcePanel";
+import { DebugLogsPanel } from "./DebugLogsPanel";
 import { lightGraphTheme } from "./graphTheme";
 import {
   parseGraphPayload,
@@ -219,6 +220,11 @@ export default function GraphGenerator({
         <SourcePanel
           selection={selection}
           filename={parsed.filename}
+          theme={theme}
+        />
+
+        <DebugLogsPanel
+          debug_logs={parsed.debug_logs}
           theme={theme}
         />
       </div>

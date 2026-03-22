@@ -216,6 +216,7 @@ export function CallGraphCanvas({
       .attr("stroke-width", 1.5)
       .attr("fill", (d) => {
         if (d.kind === "route") return theme.nodeRoute;
+        if (d.kind === "import") return theme.nodeImport;
         return d.external ? theme.nodeExternal : theme.nodeInternal;
       })
       .attr("opacity", 1);
@@ -242,6 +243,7 @@ export function CallGraphCanvas({
       .text((d) => {
         const parts = [d.label];
         if (d.kind === "route") parts.push("route entry");
+        if (d.kind === "import") parts.push("import relationship");
         if (d.external) parts.push("external / builtin");
         if (d.isEntry) parts.push("entry — no caller in this graph");
         return parts.join(" — ");

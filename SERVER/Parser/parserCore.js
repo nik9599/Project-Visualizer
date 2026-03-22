@@ -46,10 +46,13 @@ function parseSourceToFunctions(code, ext) {
   function enterFn(name, node) {
     if (!name) return;
     fnStack.push(name);
-    functions[name] = {
-      callees: [],
-      code: code.slice(node.start, node.end),
-    };
+    // Only add top-level functions as nodes, not nested functions
+    if (fnStack.length === 1) {
+      functions[name] = {
+        callees: [],
+        code: code.slice(node.start, node.end),
+      };
+    }
   }
 
   function exitFn() {
