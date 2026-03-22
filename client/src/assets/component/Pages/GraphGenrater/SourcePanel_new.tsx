@@ -1,0 +1,1 @@
+// This file is no longer needed - replaced by SourcePanel.tsx

@@ -151,7 +151,6 @@ Project-Visualizer/
 ## 🌐 API Endpoints
 
 - **POST** `/upload` - Upload a file and generate call graph
-- **GET** `/docs` - Swagger API documentation
 
 ---
 

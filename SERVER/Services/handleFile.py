@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 import zipfile
 from flask import jsonify
 
@@ -10,17 +11,14 @@ from flask import jsonify
 _SERVICES_DIR = os.path.dirname(os.path.abspath(__file__))
 PARSER_PATH = os.path.join(_SERVICES_DIR, "..", "Parser", "parser.js")
 PARSE_PROJECT_PATH = os.path.join(_SERVICES_DIR, "..", "Parser", "parseProject.js")
+PROJECTS_DIR = os.path.abspath(os.path.join(_SERVICES_DIR, "..", "projects"))
+os.makedirs(PROJECTS_DIR, exist_ok=True)
 
 # project_type from multipart form: "single" | "react" | "vanilla"
 
 
-def uploadFile(file, project_type: str = "single"):
-    """
-    Receive a file from Flask, run the Babel parser, return the call graph JSON.
+def uploadFile(file, project_type: str = "single", persist: bool = False):
 
-    - Single .js/.ts/.tsx file: project_type should be "single" (default).
-    - Zip archive of a frontend project: set project_type to "react" or "vanilla".
-    """
     if file is None:
         return jsonify({"error": "No file provided"}), 400
 
@@ -32,10 +30,10 @@ def uploadFile(file, project_type: str = "single"):
     pt = (project_type or "single").strip().lower()
 
     if ext == ".zip":
-        # Swagger / curl often omit project_type; default zip → React-style scan
+        # Default zip → React-style scan
         if pt not in ("react", "vanilla"):
             pt = "react"
-        return _handle_zip_project(file, filename, pt)
+        return _handle_zip_project(file, filename, pt, persist=persist)
 
     # Single source file
     if pt not in ("single", "react", "vanilla"):
@@ -67,31 +65,43 @@ def uploadFile(file, project_type: str = "single"):
     return jsonify(payload)
 
 
-def _handle_zip_project(file, filename: str, mode: str):
-    """Extract zip to a temp directory and run parseProject.js."""
+def _handle_zip_project(file, filename: str, mode: str, *, persist: bool = False):
+    """
+    Extract zip and run parseProject.js.
+    If persist is False (Generate graph only), extract to a temp dir and delete it after — no project_id on disk.
+    If persist is True, keep under PROJECTS_DIR with a stable project_id (legacy / rare).
+    """
+    project_id = str(uuid.uuid4())
+    if persist:
+        project_dir = os.path.join(PROJECTS_DIR, project_id)
+        os.makedirs(project_dir, exist_ok=True)
+    else:
+        project_dir = tempfile.mkdtemp(prefix="pv-ephemeral-")
+
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as ztmp:
         zip_path = ztmp.name
         file.save(zip_path)
 
-    extract_dir = tempfile.mkdtemp(prefix="pv_project_")
     try:
-        _safe_extract_zip(zip_path, extract_dir)
+        _safe_extract_zip(zip_path, project_dir)
     except (zipfile.BadZipFile, ValueError) as e:
         os.unlink(zip_path)
-        shutil.rmtree(extract_dir, ignore_errors=True)
+        shutil.rmtree(project_dir, ignore_errors=True)
         return jsonify({"error": f"Invalid zip: {e}"}), 400
     finally:
         os.unlink(zip_path)
 
-    root = _find_project_root(extract_dir)
+    root = _find_project_root(project_dir)
 
     try:
         result, debug_logs = analyze_project(root, mode)
     except Exception as e:
-        shutil.rmtree(extract_dir, ignore_errors=True)
+        shutil.rmtree(project_dir, ignore_errors=True)
         return jsonify({"error": str(e)}), 500
+    finally:
+        if not persist:
+            shutil.rmtree(project_dir, ignore_errors=True)
 
-    shutil.rmtree(extract_dir, ignore_errors=True)
     print("result: ", result)
     print("debug_logs: ", debug_logs)
     graph = format_for_graph(result)
@@ -101,6 +111,43 @@ def _handle_zip_project(file, filename: str, mode: str):
         "project_type": mode,
         "graph": graph,
         "debug_logs": debug_logs,
+        "ephemeral": not persist,
+    }
+    if persist:
+        payload["project_id"] = project_id
+    if not graph.get("nodes"):
+        payload["hint"] = (
+            "No callable units were extracted. Include .js/.ts/.tsx files with "
+            "function declarations, const/arrow functions, or class methods. "
+            "React zips are scanned under src/ when that folder exists."
+        )
+    return jsonify(payload)
+
+
+def graph_from_saved_project(project_id: str, project_type: str = "react"):
+    """Re-run parseProject.js on a project already stored under PROJECTS_DIR (after Setup IDE)."""
+    pt = (project_type or "react").strip().lower()
+    if pt not in ("react", "vanilla"):
+        pt = "react"
+
+    project_dir = os.path.join(PROJECTS_DIR, project_id)
+    if not os.path.isdir(project_dir):
+        return jsonify({"error": "Project not found"}), 404
+
+    root = _find_project_root(project_dir)
+    try:
+        result, debug_logs = analyze_project(root, pt)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    graph = format_for_graph(result)
+    payload: dict = {
+        "filename": "(saved project)",
+        "project_type": pt,
+        "project_id": project_id,
+        "graph": graph,
+        "debug_logs": debug_logs,
+        "ephemeral": False,
     }
     if not graph.get("nodes"):
         payload["hint"] = (
@@ -269,3 +316,18 @@ def analyze_project(root_dir: str, mode: str) -> tuple[dict, str]:
         )
 
     return json.loads(proc.stdout), proc.stderr
+
+
+def updateFile(project_id: str, file_path: str, content: str):
+    """Delegate to Services.setup_ide (lazy import avoids circular import)."""
+    from Services.setup_ide import updateFile as _update_file
+
+    return _update_file(project_id, file_path, content)
+
+
+def downloadProject(project_id: str):
+    """Delegate to Services.setup_ide."""
+    from Services.setup_ide import downloadProject as _download_project
+
+    return _download_project(project_id)
+

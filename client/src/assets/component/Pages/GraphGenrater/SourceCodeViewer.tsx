@@ -1,7 +1,5 @@
 import React from "react";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { MonacoEditor } from "./MonacoEditor";
 
 export function inferPrismLanguage(filename: string): string {
   const lower = filename.toLowerCase();
@@ -47,13 +45,8 @@ export function SourceCodeViewer({
 }: SourceCodeViewerProps): React.JSX.Element {
   const language = inferPrismLanguage(filename);
   const isLight = variant === "light";
-  const style = isLight ? oneLight : vscDarkPlus;
   const bg = isLight ? "#fafafa" : "#0b1220";
   const border = isLight ? "rgba(15, 23, 42, 0.12)" : "rgba(148, 163, 184, 0.2)";
-  const lineBorder = isLight
-    ? "rgba(15, 23, 42, 0.08)"
-    : "rgba(148, 163, 184, 0.12)";
-  const lineNum = isLight ? "#94a3b8" : "#64748b";
 
   const scrollBoxStyle: React.CSSProperties = fillContainer
     ? {
@@ -83,7 +76,7 @@ export function SourceCodeViewer({
         ...scrollBoxStyle,
       }}
     >
-      <SyntaxHighlighter
+      {/* <SyntaxHighlighter
         language={language}
         style={style}
         showLineNumbers
@@ -119,7 +112,12 @@ export function SourceCodeViewer({
         }}
       >
         {code}
-      </SyntaxHighlighter>
+      </SyntaxHighlighter> */}
+      <MonacoEditor
+       defaultValue={code}
+       language={language}
+       theme={isLight ? "light" : "vs-dark"}
+      />
     </div>
   );
 }

@@ -106,7 +106,8 @@ export function CallGraphCanvas({
 
     const zoom = d3
       .zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.06, 6])
+      .scaleExtent([0.1, 3])
+      .translateExtent([[-VIEW_W / 2, -VIEW_H / 2], [VIEW_W * 1.5, VIEW_H * 1.5]])
       .on("zoom", (event) => {
         root.attr("transform", event.transform.toString());
       });
@@ -250,6 +251,12 @@ export function CallGraphCanvas({
       });
 
     simulation.on("tick", () => {
+      // Constrain nodes within bounds to prevent infinite scrolling
+      nodes.forEach((d) => {
+        d.x = Math.max(150, Math.min(VIEW_W - 150, d.x ?? VIEW_W / 2));
+        d.y = Math.max(150, Math.min(VIEW_H - 150, d.y ?? VIEW_H / 2));
+      });
+
       link
         .attr("x1", (d) => (d.source as GraphNodeDatum).x ?? 0)
         .attr("y1", (d) => (d.source as GraphNodeDatum).y ?? 0)
