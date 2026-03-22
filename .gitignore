@@ -26,6 +26,9 @@ build/
 .env.local
 .env.*.local
 
+# Server: extracted project folders (Setup IDE / local workspace)
+SERVER/projects/
+
 # Logs
 *.log
 npm-debug.log*
