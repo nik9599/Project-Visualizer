@@ -1,6 +1,5 @@
 import { useState, useCallback } from "react";
 import DragAndDropComponent from "../DragDropComponent/DragAndDropComponent";
-import GraphGenerator from "../GraphGenrater/GraphGenerator";
 import { fetchProjectGraph, type UploadProjectType } from "../../API/api";
 
 export default function LandingPage(): React.JSX.Element {
@@ -126,13 +125,7 @@ export default function LandingPage(): React.JSX.Element {
           onSetupIdeSuccess={handleSetupIdeSuccess}
         />
       ) : (
-        <GraphGenerator
-          data={uploadData}
-          projectId={projectId}
-          onRefreshFromSavedProject={
-            projectId ? handleRefreshFromSavedProject : undefined
-          }
-        />
+      <></>
       )}
     </div>
   );
